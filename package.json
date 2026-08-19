@@ -1,9 +1,9 @@
 {
-  "name": "oracle",
+  "name": "sortilege",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "ORACLE \u2014 a drone that is always running. Cards do not play music; they place constraints on a process that never stops.",
+  "description": "SORTILEGE \u2014 a drone that is always running. Cards do not play music; they place constraints on a process that never stops.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
