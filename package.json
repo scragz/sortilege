@@ -1,0 +1,21 @@
+{
+  "name": "oracle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ORACLE \u2014 a drone that is always running. Cards do not play music; they place constraints on a process that never stops.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.worker.json",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "wrangler": "^4.115.0"
+  }
+}
