@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "oracle",
+  "name": "sortilege",
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-01",
   "build": {
