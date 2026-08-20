@@ -64,6 +64,9 @@ export function place(
   const t0 = audio().ctx.currentTime + 0.35;
   const pos = POS[n], step = STAGGER[n];
 
+  // the room is carved first; the cards are then placed into it
+  carve(cards.filter((c) => c.scope === "voice").length, t0);
+
   cards.forEach((card, i) => {
     const t = t0 + i * step;
     const lay = n === 10 && i === 1;              // the crossing card lies across
@@ -80,8 +83,6 @@ export function place(
     wrap.addEventListener("click", () => onInspect(l));
     live.push(l);
   });
-
-  carve(live.filter((l) => l.slotIdx >= 0).length, t0);
 }
 
 /** The only thing that ends a reading. */

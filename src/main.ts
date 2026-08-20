@@ -7,8 +7,8 @@
 import "./style.css";
 
 import { draw } from "./deck/cards";
-import { initAudio, audio, ready, resumeIfSuspended } from "./audio/graph";
-import { RISE, focusVoice, unfocusVoices } from "./audio/deal";
+import { initAudio, audio, ready, sleepAudio, wakeAudio } from "./audio/graph";
+import { RISE, focusCard, unfocusVoices } from "./audio/deal";
 import {
   clearReading, live, place, slotEl,
   type LiveCard, type SpreadSize,
@@ -48,7 +48,7 @@ function openInspect(l: LiveCard): void {
   inspect.replaceChildren(big.wrap);
   inspect.classList.add("on");
   l.zoomEl = big.el;
-  focusVoice(l.slotIdx);
+  focusCard(l.card, l.slotIdx);
 }
 
 function closeInspect(): void {
@@ -136,7 +136,17 @@ clearBtn.addEventListener("click", () => {
 
 inspect.addEventListener("click", closeInspect);
 
+// A backgrounded tab stops feeding the audio thread on time, and a starved
+// render of thirty oscillators through a convolver comes back as beeping and
+// popping. So the reading is put down when the page goes away and picked up
+// when it returns — ctx.currentTime freezes with it, so the cards resume
+// exactly where their envelopes left off.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") resumeIfSuspended();
+  if (!ready()) return;
+  if (document.visibilityState === "hidden") sleepAudio();
+  else wakeAudio();
 });
-window.addEventListener("focus", resumeIfSuspended);
+window.addEventListener("pagehide", () => { if (ready()) sleepAudio(); });
+window.addEventListener("pageshow", () => {
+  if (ready() && document.visibilityState === "visible") wakeAudio();
+});
