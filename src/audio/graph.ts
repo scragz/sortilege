@@ -124,6 +124,11 @@ export function initAudio(): Graph {
   const Ctor = window.AudioContext ??
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const ctx = new Ctor({ latencyHint: "playback" });
+  // Some browsers (notably Safari) leave a freshly constructed context "suspended"
+  // even when built inside a user gesture. Resume synchronously, in the same gesture
+  // call stack, or the context clock never ticks — no sound, and every card stays
+  // invisible since the visual envelope is timed off ctx.currentTime.
+  if (ctx.state !== "running") void ctx.resume();
 
   // ── master ──────────────────────────────────────────────
   const comp = ctx.createDynamicsCompressor();
