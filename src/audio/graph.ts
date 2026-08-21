@@ -374,7 +374,6 @@ let napping = false;
 let hasRun = false;
 /** Where the master is currently headed, so a redundant call cannot re-aim it. */
 let masterAim = 0;
-let resuming: Promise<boolean> | null = null;
 
 function cancelSleep(): void {
   if (sleepTimer !== null) { clearTimeout(sleepTimer); sleepTimer = null; }
@@ -397,41 +396,54 @@ function fadeUp(): void {
   else { master.gain.setTargetAtTime(MASTER, t, 4); hasRun = true; }  // it fades up; it never starts
 }
 
+/** How long to wait on a resume before judging it by ctx.state instead. */
+const RESUME_WAIT = 500;
+
+/** Settle regardless: Safari can hand back a resume promise that never does. */
+function settled(p: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((done) => {
+    const fin = (): void => done();
+    setTimeout(fin, ms);
+    p.then(fin, fin);
+  });
+}
+
 /**
- * Start the clock, from inside a user gesture. Safe to call on every gesture
- * the page sees, and it needs to be, for two reasons:
+ * Start the clock, from inside a user gesture.
  *
- *  - Safari can hand back a context that is still "suspended" even when it was
- *    constructed inside a gesture, and a resume that loses the gesture (or is
- *    rejected outright) leaves a context that will never tick. One tap at a
- *    gate that then latches open gives that failure no way back.
- *  - iOS has a fifth, non-standard state: "interrupted", entered on a call,
- *    Siri, a lock, or another app taking audio focus. resume() from a
- *    visibilitychange handler is not a gesture and can simply not take, so the
- *    drone stays dead until the page is reloaded.
+ * Two things this must not do, both learned the hard way:
  *
- * Resolves to whether the clock is running by the time it settles.
+ *  - It must not reuse an in-flight resume. Safari honours a resume only while
+ *    the activation that reached it is live, so handing a later gesture an
+ *    earlier promise throws away the one thing that could have worked — and if
+ *    that earlier promise never settles, which Safari does on a context it is
+ *    refusing, nothing can ever start the clock again. Every gesture gets its
+ *    own resume() call, inside its own activation.
+ *  - It must not believe the promise. Success is read off ctx.state once the
+ *    resume has settled or run out of patience, never from the promise
+ *    resolving, which can lie in both directions.
+ *
+ * iOS also has a fifth, non-standard state — "interrupted", entered on a call,
+ * Siri, a lock, or another app taking audio focus — that only a gesture can
+ * leave, which is why this is wired to every gesture the page sees.
  */
 export function unlock(): Promise<boolean> {
-  const { ctx } = initAudio();
+  let ctx: AudioContext;
+  try { ctx = initAudio().ctx; } catch { return Promise.resolve(false); }
   napping = false;
   cancelSleep();
 
   if (ctx.state === "running") { fadeUp(); notify(); return Promise.resolve(true); }
 
-  // A tap produces both a pointerdown and a click, and both are entitled to ask
-  // for the clock. The second gets the first one's promise rather than a bare
-  // false, so a caller waiting to deal on the strength of this unlock is not
-  // told the unlock failed when it is merely still in flight.
-  if (resuming) return resuming;
-
   // resume() is called synchronously here so it still sits inside the gesture
   // that reached us; anything awaited first would forfeit the activation.
-  const p = ctx.resume()
-    .then(() => { const ok = ctx.state === "running"; if (ok) fadeUp(); return ok; }, () => false)
-    .then((ok) => { resuming = null; notify(); return ok; });
-  resuming = p;
-  return p;
+  const attempt = ctx.resume();
+  return settled(attempt, RESUME_WAIT).then(() => {
+    const ok = ctx.state === "running";
+    if (ok) fadeUp();
+    notify();
+    return ok;
+  });
 }
 
 export function sleepAudio(): void {

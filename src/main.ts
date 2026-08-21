@@ -113,7 +113,19 @@ function frame(): void {
 // ── input ───────────────────────────────────────────────────────
 
 let looping = false;
-let opened = false;   // the gate has been let go at least once
+let opened = false;    // the clock has run at least once
+let failures = 0;      // consecutive taps whose unlock did not take
+let lastFail = 0;
+
+/** Refused taps before the gate steps aside anyway. */
+const GIVE_UP = 2;
+/**
+ * One tap fires several of the gestures below — four on touch, three with a
+ * mouse, one from the keyboard — and they settle together. Failures inside this
+ * window are the same tap, so the count stays in taps rather than in however
+ * many events the device happened to send.
+ */
+const SAME_TAP = 300;
 
 /**
  * The gate is the app's only claim that the drone is running, so it is tied to
@@ -123,7 +135,13 @@ let opened = false;   // the gate has been let go at least once
  * only thing allowed to fix it.
  */
 function syncGate(): void {
-  const up = !running() && !asleep();
+  // The gate steps aside once the clock runs — and also once we have genuinely
+  // tried and failed, because a gate that cannot be got past is worse than no
+  // gate at all. That is safe to do: dealing is gated on running() rather than
+  // on the gate, so nothing can be put on a dead clock, and the spread buttons
+  // then become a second unlock surface — their click is a better activation
+  // gesture than whatever just failed.
+  const up = !running() && !asleep() && failures < GIVE_UP;
   gate.classList.toggle("open", !up);
   if (up && opened) gateSay.textContent = "touch to resume";
 }
@@ -137,7 +155,13 @@ function warmPicks(): void {
 function tryUnlock(): Promise<boolean> {
   if (!looping) { looping = true; requestAnimationFrame(frame); }
   return unlock().then((ok) => {
-    if (ok && !opened) { opened = true; warmPicks(); }
+    if (ok) {
+      failures = 0;
+      if (!opened) { opened = true; warmPicks(); }
+    } else {
+      const at = performance.now();
+      if (at - lastFail > SAME_TAP) { failures++; lastFail = at; }
+    }
     syncGate();
     return ok;
   });
@@ -148,10 +172,19 @@ function tryUnlock(): Promise<boolean> {
 // "interrupted" on a call or a lock. Capture phase, so whatever the user
 // reaches for next revives it — the gate, a spread, or a card.
 //
+// All of these, because only some of them grant the activation a resume needs.
+// pointerdown alone was the bug: it is an activation trigger for a mouse and
+// not for a finger, so unlocking worked at a desk and did nothing on a phone.
+// The ones that count on touch are pointerup and touchend; click and keydown
+// cover the rest. Asking on all of them costs nothing — unlock() is a no-op
+// once the clock is running.
+//
 // Unconditional, because this also reconciles the gate with reality on every
 // gesture. A gate left up over a context that is in fact running would cover
 // the whole page with no way past it: the same latch, pointing the other way.
-document.addEventListener("pointerdown", () => { void tryUnlock(); }, true);
+for (const type of ["pointerdown", "pointerup", "touchend", "click", "keydown"]) {
+  document.addEventListener(type, () => { void tryUnlock(); }, true);
+}
 
 onAudioState(syncGate);
 
