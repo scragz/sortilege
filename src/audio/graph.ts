@@ -117,7 +117,43 @@ export function audio(): Graph {
   return graph;
 }
 
-export const ready = (): boolean => graph !== null;
+/** Anyone who wants to know whether the clock is real. */
+type StateListener = (running: boolean) => void;
+const listeners = new Set<StateListener>();
+
+export function onAudioState(fn: StateListener): void {
+  listeners.add(fn);
+}
+
+/**
+ * Tell everyone where the clock stands. Fired on the context's own statechange
+ * and again whenever a resume settles, because a resume that is refused
+ * produces no statechange at all — and a refused resume is exactly the case
+ * the UI most needs to hear about.
+ */
+function notify(): void {
+  const ok = running();
+  for (const fn of listeners) fn(ok);
+}
+
+/** The graph has been built. Says nothing about whether it is running. */
+export const started = (): boolean => graph !== null;
+
+/**
+ * The clock is actually advancing.
+ *
+ * This is the distinction the app was missing. Everything downstream — when a
+ * card is scheduled, when its envelope opens, whether it is ever drawn — is
+ * timed off ctx.currentTime. A context that exists but is suspended reports
+ * currentTime as a constant, so a spread dealt against it is scheduled at a
+ * moment that never arrives: the cards go into the DOM, the envelope reads
+ * zero forever, and they stay invisible and silent. That is indistinguishable
+ * from "it didn't deal", and it is why it worked only sometimes.
+ */
+export const running = (): boolean => graph !== null && graph.ctx.state === "running";
+
+/** Deliberately put down (backgrounded), as opposed to unexpectedly stopped. */
+export const asleep = (): boolean => napping;
 
 /**
  * Freeze a param at its current value so a new ramp starts from where the ear
@@ -248,11 +284,10 @@ export function initAudio(): Graph {
   const Ctor = window.AudioContext ??
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const ctx = new Ctor({ latencyHint: "playback" });
-  // Some browsers (notably Safari) leave a freshly constructed context "suspended"
-  // even when built inside a user gesture. Resume synchronously, in the same gesture
-  // call stack, or the context clock never ticks — no sound, and every card stays
-  // invisible since the visual envelope is timed off ctx.currentTime.
-  if (ctx.state !== "running") void ctx.resume();
+  // The context is built here but not started here. Starting it is unlock()'s
+  // job, because a resume can fail and the rest of the app must not be told the
+  // clock is ticking when it is not.
+  ctx.addEventListener("statechange", notify);
 
   // ── master ──────────────────────────────────────────────
   const comp = ctx.createDynamicsCompressor();
@@ -263,7 +298,9 @@ export function initAudio(): Graph {
   const mFilt = ctx.createBiquadFilter();
   mFilt.type = "lowpass"; mFilt.frequency.value = DEF.mFilt; mFilt.Q.value = 0.5;
   mFilt.connect(master).connect(comp).connect(ctx.destination);
-  master.gain.setTargetAtTime(MASTER, ctx.currentTime, 4);  // it fades up; it never starts
+  // The fade up is deliberately not scheduled here: on a context that never
+  // resumes, currentTime stays at zero and the ramp would already be spent by
+  // the time the clock finally moved. fadeUp() runs it once the clock is real.
 
   // ── wet buses ───────────────────────────────────────────
   const verb = ctx.createConvolver(); verb.buffer = impulse(ctx);
@@ -331,36 +368,109 @@ export function initAudio(): Graph {
 // and ctx.currentTime freezes with it, so the visual envelope resumes in step.
 
 let sleepTimer: ReturnType<typeof setTimeout> | null = null;
+/** Set the moment we decide to sleep, cleared the moment we decide to wake. */
+let napping = false;
+/** The clock has run at least once, so a later fade is a return, not a start. */
+let hasRun = false;
+/** Where the master is currently headed, so a redundant call cannot re-aim it. */
+let masterAim = 0;
+let resuming: Promise<boolean> | null = null;
 
 function cancelSleep(): void {
   if (sleepTimer !== null) { clearTimeout(sleepTimer); sleepTimer = null; }
 }
 
+/**
+ * Bring the master back up. The first time it is the slow swell the piece opens
+ * with; every time after that it is a return, and a return should be quick.
+ */
+function fadeUp(): void {
+  // unlock() runs on every gesture, so this is asked for constantly. Re-ramping
+  // a master that is already on its way to MASTER would restate the slow
+  // opening swell as the fast return ramp and cut it short.
+  if (!graph || masterAim === MASTER) return;
+  masterAim = MASTER;
+  const { ctx, master } = graph;
+  const t = ctx.currentTime;
+  hold(master.gain, t);
+  if (hasRun) master.gain.linearRampToValueAtTime(MASTER, t + 0.7);
+  else { master.gain.setTargetAtTime(MASTER, t, 4); hasRun = true; }  // it fades up; it never starts
+}
+
+/**
+ * Start the clock, from inside a user gesture. Safe to call on every gesture
+ * the page sees, and it needs to be, for two reasons:
+ *
+ *  - Safari can hand back a context that is still "suspended" even when it was
+ *    constructed inside a gesture, and a resume that loses the gesture (or is
+ *    rejected outright) leaves a context that will never tick. One tap at a
+ *    gate that then latches open gives that failure no way back.
+ *  - iOS has a fifth, non-standard state: "interrupted", entered on a call,
+ *    Siri, a lock, or another app taking audio focus. resume() from a
+ *    visibilitychange handler is not a gesture and can simply not take, so the
+ *    drone stays dead until the page is reloaded.
+ *
+ * Resolves to whether the clock is running by the time it settles.
+ */
+export function unlock(): Promise<boolean> {
+  const { ctx } = initAudio();
+  napping = false;
+  cancelSleep();
+
+  if (ctx.state === "running") { fadeUp(); notify(); return Promise.resolve(true); }
+
+  // A tap produces both a pointerdown and a click, and both are entitled to ask
+  // for the clock. The second gets the first one's promise rather than a bare
+  // false, so a caller waiting to deal on the strength of this unlock is not
+  // told the unlock failed when it is merely still in flight.
+  if (resuming) return resuming;
+
+  // resume() is called synchronously here so it still sits inside the gesture
+  // that reached us; anything awaited first would forfeit the activation.
+  const p = ctx.resume()
+    .then(() => { const ok = ctx.state === "running"; if (ok) fadeUp(); return ok; }, () => false)
+    .then((ok) => { resuming = null; notify(); return ok; });
+  resuming = p;
+  return p;
+}
+
 export function sleepAudio(): void {
-  if (!graph) return;
+  if (!graph || napping) return;
   const { ctx, master } = graph;
   cancelSleep();
   if (ctx.state === "suspended") return;
+  napping = true;
+  masterAim = 0;
   const t = ctx.currentTime;
   hold(master.gain, t);
   master.gain.linearRampToValueAtTime(0.0001, t + 0.35);
+  // The suspend is gated on our own intent rather than on a re-read of
+  // visibilityState: pagehide can arrive while the page still reports itself
+  // visible, and the old guard then skipped the suspend while the fade had
+  // already muted everything — silent, on screen, with no way back.
   sleepTimer = setTimeout(() => {
     sleepTimer = null;
-    if (graph && document.visibilityState === "hidden" && graph.ctx.state === "running")
-      void graph.ctx.suspend();
+    if (graph && napping && graph.ctx.state === "running") void graph.ctx.suspend();
   }, 500);
+  notify();
 }
 
-/** Also the way back from a suspend the OS imposed — a call, Siri, a lock. */
+/**
+ * Come back. Clears the sleep intent first, so that if the resume does not take
+ * — an OS-imposed interruption needs a gesture, and this is not one — the app
+ * can see a context that is neither running nor deliberately asleep, and put
+ * the gate back up to ask for the tap that will fix it.
+ */
 export function wakeAudio(): void {
   if (!graph) return;
+  napping = false;
   cancelSleep();
-  const { ctx, master } = graph;
-  const fadeUp = (): void => {
-    const t = ctx.currentTime;
-    hold(master.gain, t);
-    master.gain.linearRampToValueAtTime(MASTER, t + 0.7);
-  };
-  if (ctx.state === "running") fadeUp();
-  else void ctx.resume().then(fadeUp, fadeUp);
+  const { ctx } = graph;
+  if (ctx.state === "running") { fadeUp(); notify(); return; }
+  // notify only once the resume has settled. Announcing a stopped clock the
+  // instant we ask for it would flash the gate on every return to the tab.
+  void ctx.resume().then(
+    () => { if (ctx.state === "running") fadeUp(); notify(); },
+    () => notify(),
+  );
 }

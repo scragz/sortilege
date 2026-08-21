@@ -7,7 +7,9 @@
 import "./style.css";
 
 import { draw } from "./deck/cards";
-import { initAudio, audio, ready, sleepAudio, wakeAudio } from "./audio/graph";
+import {
+  audio, asleep, onAudioState, running, sleepAudio, started, unlock, wakeAudio,
+} from "./audio/graph";
 import { RISE, focusCard, unfocusVoices } from "./audio/deal";
 import {
   clearReading, live, place, slotEl,
@@ -28,6 +30,7 @@ const inspect = el("inspect");
 const spreads = el("spreads");
 const clearBox = el("clearWrap");
 const gate = el("gate");
+const gateSay = gate.querySelector<HTMLElement>(".say")!;
 const clearBtn = el<HTMLButtonElement>("clearBtn");
 
 let reading = false;
@@ -42,6 +45,7 @@ function setReading(on: boolean): void {
 // ── inspect ─────────────────────────────────────────────────────
 
 function openInspect(l: LiveCard): void {
+  if (!running()) return;
   if (l.clearAt !== null || audio().ctx.currentTime < l.t0) return;   // hasn't arrived yet
   zoomed = l;
   const big = slotEl(l.card, 1, false, false);
@@ -64,7 +68,7 @@ function closeInspect(): void {
 
 function frame(): void {
   requestAnimationFrame(frame);
-  if (!ready()) return;
+  if (!running()) return;
   const now = audio().ctx.currentTime;
   let sum = 0;
   let swept = false;
@@ -108,27 +112,66 @@ function frame(): void {
 
 // ── input ───────────────────────────────────────────────────────
 
-function start(): void {
-  initAudio();
-  requestAnimationFrame(frame);
-  gate.classList.add("open");
+let looping = false;
+let opened = false;   // the gate has been let go at least once
+
+/**
+ * The gate is the app's only claim that the drone is running, so it is tied to
+ * whether the clock is actually running rather than to whether a tap happened.
+ * A tap that fails to unlock leaves it up, still saying what to do; an
+ * interruption the OS imposed puts it back, asking for the gesture that is the
+ * only thing allowed to fix it.
+ */
+function syncGate(): void {
+  const up = !running() && !asleep();
+  gate.classList.toggle("open", !up);
+  if (up && opened) gateSay.textContent = "touch to resume";
+}
+
+function warmPicks(): void {
   document.querySelectorAll<HTMLElement>(".picks .pick")
     .forEach((b, i) => setTimeout(() => b.classList.add("warm"), 1400 + i * 400));
 }
 
-gate.addEventListener("pointerdown", () => { if (!ready()) start(); }, { once: true });
+/** Every gesture is a chance to start, or to recover. Never a one-shot. */
+function tryUnlock(): Promise<boolean> {
+  if (!looping) { looping = true; requestAnimationFrame(frame); }
+  return unlock().then((ok) => {
+    if (ok && !opened) { opened = true; warmPicks(); }
+    syncGate();
+    return ok;
+  });
+}
+
+// Any gesture, anywhere, may start or recover the clock: a context can stop
+// being usable without the page being touched at all, since iOS drops it into
+// "interrupted" on a call or a lock. Capture phase, so whatever the user
+// reaches for next revives it — the gate, a spread, or a card.
+//
+// Unconditional, because this also reconciles the gate with reality on every
+// gesture. A gate left up over a context that is in fact running would cover
+// the whole page with no way past it: the same latch, pointing the other way.
+document.addEventListener("pointerdown", () => { void tryUnlock(); }, true);
+
+onAudioState(syncGate);
 
 document.querySelectorAll<HTMLButtonElement>(".picks .pick").forEach((btn) => {
   btn.addEventListener("click", () => {
-    if (!ready() || reading) return;
+    if (reading) return;
     const n = Number(btn.dataset.n) as SpreadSize;
-    place(stage, draw(n), n, openInspect);
-    setReading(true);
+    // The click is itself a gesture, so it is a legitimate place to recover a
+    // stopped clock. Dealing waits for that to settle: a spread scheduled
+    // against a frozen currentTime is scheduled for a time that never comes.
+    void tryUnlock().then((ok) => {
+      if (!ok || reading) return;
+      place(stage, draw(n), n, openInspect);
+      setReading(true);
+    });
   });
 });
 
 clearBtn.addEventListener("click", () => {
-  if (!ready() || !reading) return;
+  if (!running() || !reading) return;
   closeInspect();
   clearReading();
   setReading(false);
@@ -142,11 +185,11 @@ inspect.addEventListener("click", closeInspect);
 // when it returns — ctx.currentTime freezes with it, so the cards resume
 // exactly where their envelopes left off.
 document.addEventListener("visibilitychange", () => {
-  if (!ready()) return;
+  if (!started()) return;
   if (document.visibilityState === "hidden") sleepAudio();
   else wakeAudio();
 });
-window.addEventListener("pagehide", () => { if (ready()) sleepAudio(); });
+window.addEventListener("pagehide", () => { if (started()) sleepAudio(); });
 window.addEventListener("pageshow", () => {
-  if (ready() && document.visibilityState === "visible") wakeAudio();
+  if (started() && document.visibilityState === "visible") wakeAudio();
 });
